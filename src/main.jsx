@@ -104,8 +104,107 @@ function useAmbientMusic() {
   const audioRef = useRef(null);
   const [playing, setPlaying] = useState(false);
 
+  const ensureAudio = () => {
+    if (audioRef.current) return audioRef.current;
+
+    const AudioEngine = window.AudioContext || window.webkitAudioContext;
+    if (!AudioEngine) return null;
+
+    const context = new AudioEngine();
+    const master = context.createGain();
+    master.gain.value = 0.0;
+    master.connect(context.destination);
+
+    const delay = context.createDelay();
+    const feedback = context.createGain();
+    const filter = context.createBiquadFilter();
+    filter.type = "lowpass";
+    filter.frequency.value = 1600;
+    delay.delayTime.value = 0.28;
+    feedback.gain.value = 0.18;
+    delay.connect(feedback);
+    feedback.connect(delay);
+    delay.connect(filter);
+    filter.connect(master);
+
+    const melody = [523.25, 659.25, 783.99, 659.25, 587.33, 698.46, 880.0, 783.99];
+    let step = 0;
+
+    const playNote = () => {
+      const now = context.currentTime;
+      const oscillator = context.createOscillator();
+      const noteGain = context.createGain();
+
+      oscillator.type = step % 3 === 0 ? "sine" : "triangle";
+      oscillator.frequency.setValueAtTime(melody[step % melody.length], now);
+      noteGain.gain.setValueAtTime(0.0001, now);
+      noteGain.gain.exponentialRampToValueAtTime(0.13, now + 0.05);
+      noteGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.78);
+
+      oscillator.connect(noteGain);
+      noteGain.connect(delay);
+      noteGain.connect(filter);
+      oscillator.start(now);
+      oscillator.stop(now + 0.84);
+      step += 1;
+    };
+
+    audioRef.current = { context, master, loopId: null, playNote };
+    return audioRef.current;
+  };
+
+  const start = async () => {
+    const audio = ensureAudio();
+    if (!audio || audio.loopId) return;
+
+    const { context, master, playNote } = audio;
+    await context.resume();
+    if (context.state !== "running") {
+      throw new Error("Audio autoplay blocked");
+    }
+
+    const now = context.currentTime;
+    master.gain.cancelScheduledValues(now);
+    master.gain.linearRampToValueAtTime(0.34, now + 0.6);
+    playNote();
+    audio.loopId = window.setInterval(playNote, 560);
+    setPlaying(true);
+  };
+
+  const stop = () => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    const now = audio.context.currentTime;
+    audio.master.gain.cancelScheduledValues(now);
+    audio.master.gain.linearRampToValueAtTime(0.0, now + 0.6);
+    window.clearInterval(audio.loopId);
+    audio.loopId = null;
+    setPlaying(false);
+  };
+
   useEffect(() => {
+    let cancelled = false;
+
+    const tryStart = () => {
+      start().catch(() => {
+        if (!cancelled) {
+          window.addEventListener("pointerdown", tryStart, { once: true });
+          window.addEventListener("keydown", tryStart, { once: true });
+          window.addEventListener("touchstart", tryStart, { once: true });
+        }
+      });
+    };
+
+    const timer = window.setTimeout(tryStart, 450);
+
     return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      window.removeEventListener("pointerdown", tryStart);
+      window.removeEventListener("keydown", tryStart);
+      window.removeEventListener("touchstart", tryStart);
+
       if (audioRef.current) {
         window.clearInterval(audioRef.current.loopId);
         audioRef.current.context.close();
@@ -114,67 +213,12 @@ function useAmbientMusic() {
   }, []);
 
   const toggle = async () => {
-    if (!audioRef.current) {
-      const AudioEngine = window.AudioContext || window.webkitAudioContext;
-      const context = new AudioEngine();
-      const master = context.createGain();
-      master.gain.value = 0.0;
-      master.connect(context.destination);
-
-      const delay = context.createDelay();
-      const feedback = context.createGain();
-      const filter = context.createBiquadFilter();
-      filter.type = "lowpass";
-      filter.frequency.value = 1600;
-      delay.delayTime.value = 0.28;
-      feedback.gain.value = 0.18;
-      delay.connect(feedback);
-      feedback.connect(delay);
-      delay.connect(filter);
-      filter.connect(master);
-
-      const melody = [523.25, 659.25, 783.99, 659.25, 587.33, 698.46, 880.0, 783.99];
-      let step = 0;
-
-      const playNote = () => {
-        const now = context.currentTime;
-        const oscillator = context.createOscillator();
-        const noteGain = context.createGain();
-
-        oscillator.type = step % 3 === 0 ? "sine" : "triangle";
-        oscillator.frequency.setValueAtTime(melody[step % melody.length], now);
-        noteGain.gain.setValueAtTime(0.0001, now);
-        noteGain.gain.exponentialRampToValueAtTime(0.16, now + 0.04);
-        noteGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.72);
-
-        oscillator.connect(noteGain);
-        noteGain.connect(delay);
-        noteGain.connect(filter);
-        oscillator.start(now);
-        oscillator.stop(now + 0.8);
-        step += 1;
-      };
-
-      audioRef.current = { context, master, loopId: null, playNote };
+    if (audioRef.current?.loopId) {
+      stop();
+      return;
     }
 
-    const { context, master, playNote } = audioRef.current;
-    await context.resume();
-    const now = context.currentTime;
-
-    if (playing) {
-      master.gain.cancelScheduledValues(now);
-      master.gain.linearRampToValueAtTime(0.0, now + 0.6);
-      window.clearInterval(audioRef.current.loopId);
-      audioRef.current.loopId = null;
-      setPlaying(false);
-    } else {
-      master.gain.cancelScheduledValues(now);
-      master.gain.linearRampToValueAtTime(0.42, now + 0.5);
-      playNote();
-      audioRef.current.loopId = window.setInterval(playNote, 520);
-      setPlaying(true);
-    }
+    await start().catch(() => setPlaying(false));
   };
 
   return { playing, toggle };
@@ -294,7 +338,7 @@ function Hero({ onReveal }) {
             <img
               src="/photos/smile-solo.jpeg"
               alt="Smiling birthday portrait"
-              className="h-[440px] w-full rounded-[1.5rem] object-cover"
+              className="h-[440px] w-full rounded-[1.5rem] bg-rose-50/60 object-contain"
             />
             <motion.div
               className="absolute bottom-8 left-8 right-8 rounded-2xl border border-white/70 bg-white/55 p-5 shadow-glass backdrop-blur-xl"
@@ -421,11 +465,11 @@ function Gallery() {
               whileHover={{ y: -6, rotate: 0, scale: 1.018 }}
               whileTap={{ scale: 0.99 }}
             >
-              <div className="overflow-hidden bg-rose-50">
+              <div className="grid h-64 place-items-center overflow-hidden bg-rose-50">
                 <img
                   src={item.image}
                   alt={item.title}
-                  className="h-64 w-full object-cover transition duration-1000 ease-out group-hover:scale-[1.06]"
+                  className="h-full w-full object-contain transition duration-1000 ease-out"
                 />
               </div>
               <figcaption className="px-2 py-4">

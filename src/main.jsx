@@ -100,6 +100,9 @@ const finaleLights = Array.from({ length: 10 }, (_, index) => ({
   delay: index * 0.24
 }));
 
+const BIRTHDAY_MUSIC_SRC = "/music/birthday.mp3";
+const BIRTHDAY_MUSIC_VOLUME = 0.55;
+
 function useAmbientMusic() {
   const audioRef = useRef(null);
   const [playing, setPlaying] = useState(false);
@@ -107,118 +110,99 @@ function useAmbientMusic() {
   const ensureAudio = () => {
     if (audioRef.current) return audioRef.current;
 
-    const AudioEngine = window.AudioContext || window.webkitAudioContext;
-    if (!AudioEngine) return null;
-
-    const context = new AudioEngine();
-    const master = context.createGain();
-    master.gain.value = 0.0;
-    master.connect(context.destination);
-
-    const delay = context.createDelay();
-    const feedback = context.createGain();
-    const filter = context.createBiquadFilter();
-    filter.type = "lowpass";
-    filter.frequency.value = 1600;
-    delay.delayTime.value = 0.28;
-    feedback.gain.value = 0.18;
-    delay.connect(feedback);
-    feedback.connect(delay);
-    delay.connect(filter);
-    filter.connect(master);
-
-    const melody = [523.25, 659.25, 783.99, 659.25, 587.33, 698.46, 880.0, 783.99];
-    let step = 0;
-
-    const playNote = () => {
-      const now = context.currentTime;
-      const oscillator = context.createOscillator();
-      const noteGain = context.createGain();
-
-      oscillator.type = step % 3 === 0 ? "sine" : "triangle";
-      oscillator.frequency.setValueAtTime(melody[step % melody.length], now);
-      noteGain.gain.setValueAtTime(0.0001, now);
-      noteGain.gain.exponentialRampToValueAtTime(0.13, now + 0.05);
-      noteGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.78);
-
-      oscillator.connect(noteGain);
-      noteGain.connect(delay);
-      noteGain.connect(filter);
-      oscillator.start(now);
-      oscillator.stop(now + 0.84);
-      step += 1;
-    };
-
-    audioRef.current = { context, master, loopId: null, playNote };
-    return audioRef.current;
+    const audio = new Audio(BIRTHDAY_MUSIC_SRC);
+    audio.loop = true;
+    audio.preload = "auto";
+    audio.volume = BIRTHDAY_MUSIC_VOLUME;
+    audioRef.current = audio;
+    return audio;
   };
 
-  const start = async () => {
-    const audio = ensureAudio();
-    if (!audio || audio.loopId) return;
+  const syncPlayingState = () => {
+    const audio = audioRef.current;
+    setPlaying(Boolean(audio && !audio.paused && !audio.ended));
+  };
 
-    const { context, master, playNote } = audio;
-    await context.resume();
-    if (context.state !== "running") {
-      throw new Error("Audio autoplay blocked");
+  const playMusic = async (options = { mutedFirst: false }) => {
+    const audio = ensureAudio();
+    if (!audio.paused) return;
+
+    if (options.mutedFirst) {
+      audio.muted = true;
     }
 
-    const now = context.currentTime;
-    master.gain.cancelScheduledValues(now);
-    master.gain.linearRampToValueAtTime(0.34, now + 0.6);
-    playNote();
-    audio.loopId = window.setInterval(playNote, 560);
-    setPlaying(true);
+    await audio.play();
+
+    if (options.mutedFirst) {
+      window.setTimeout(() => {
+        audio.muted = false;
+        syncPlayingState();
+      }, 150);
+    }
+
+    syncPlayingState();
   };
 
   const stop = () => {
     const audio = audioRef.current;
     if (!audio) return;
-
-    const now = audio.context.currentTime;
-    audio.master.gain.cancelScheduledValues(now);
-    audio.master.gain.linearRampToValueAtTime(0.0, now + 0.6);
-    window.clearInterval(audio.loopId);
-    audio.loopId = null;
+    audio.pause();
     setPlaying(false);
   };
 
   useEffect(() => {
+    const audio = ensureAudio();
     let cancelled = false;
 
-    const tryStart = () => {
-      start().catch(() => {
-        if (!cancelled) {
-          window.addEventListener("pointerdown", tryStart, { once: true });
-          window.addEventListener("keydown", tryStart, { once: true });
-          window.addEventListener("touchstart", tryStart, { once: true });
-        }
-      });
+    const onPlay = () => {
+      if (!cancelled) setPlaying(true);
+    };
+    const onPause = () => {
+      if (!cancelled) setPlaying(false);
     };
 
-    const timer = window.setTimeout(tryStart, 450);
+    audio.addEventListener("play", onPlay);
+    audio.addEventListener("pause", onPause);
+
+    const resumeOnGesture = () => {
+      playMusic().catch(() => setPlaying(false));
+    };
+
+    const attemptAutoplay = async () => {
+      try {
+        await playMusic({ mutedFirst: true });
+      } catch {
+        if (cancelled) return;
+        window.addEventListener("pointerdown", resumeOnGesture, { once: true });
+        window.addEventListener("keydown", resumeOnGesture, { once: true });
+        window.addEventListener("touchstart", resumeOnGesture, { once: true });
+      }
+    };
+
+    const timer = window.setTimeout(attemptAutoplay, 280);
 
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
-      window.removeEventListener("pointerdown", tryStart);
-      window.removeEventListener("keydown", tryStart);
-      window.removeEventListener("touchstart", tryStart);
-
-      if (audioRef.current) {
-        window.clearInterval(audioRef.current.loopId);
-        audioRef.current.context.close();
-      }
+      window.removeEventListener("pointerdown", resumeOnGesture);
+      window.removeEventListener("keydown", resumeOnGesture);
+      window.removeEventListener("touchstart", resumeOnGesture);
+      audio.removeEventListener("play", onPlay);
+      audio.removeEventListener("pause", onPause);
+      audio.pause();
+      audio.currentTime = 0;
     };
   }, []);
 
   const toggle = async () => {
-    if (audioRef.current?.loopId) {
+    const audio = ensureAudio();
+    if (!audio.paused) {
       stop();
       return;
     }
 
-    await start().catch(() => setPlaying(false));
+    audio.muted = false;
+    await playMusic().catch(() => setPlaying(false));
   };
 
   return { playing, toggle };
@@ -263,8 +247,8 @@ function MusicToggle({ playing, onToggle }) {
       className="fixed right-4 top-4 z-30 inline-flex h-12 w-12 items-center justify-center rounded-full border border-white/70 bg-white/45 text-rose-600 shadow-glass backdrop-blur-xl transition hover:scale-105 hover:bg-white/70 focus:outline-none focus:ring-4 focus:ring-rose-200 sm:right-8 sm:top-8"
       whileTap={{ scale: 0.94 }}
       transition={smoothSpring}
-      aria-label={playing ? "Pause background music" : "Play background music"}
-      title={playing ? "Pause soft music" : "Play soft music"}
+      aria-label={playing ? "Pause birthday music" : "Play birthday music"}
+      title={playing ? "Pause birthday music" : "Play birthday music"}
     >
       {playing ? <Music2 size={21} /> : <Music size={21} />}
       <span className="sr-only">{playing ? "Pause music" : "Play music"}</span>
